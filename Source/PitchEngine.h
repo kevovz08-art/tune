@@ -9,7 +9,7 @@
 class PitchEngine
 {
 public:
-    struct Settings { int mask = 0xFFF; float speedMs = 20.f; float amount = 1.f; float refA = 440.f; float stabilizer = 0.3f; };
+    struct Settings { int mask = 0xFFF; float speedMs = 20.f; float amount = 1.f; float refA = 440.f; float stabilizer = 0.3f; float transpose = 0.f; float formantPhi = 1.f; bool formantFollow = false; };
 
     std::atomic<float> dbgMidi{ -1.f }, dbgTarget{ -1.f };
 
@@ -20,7 +20,7 @@ public:
         maxLag = (int) (sr / 80.0) + 2;
         W = maxLag;
         hop = std::max (64, (int) (sr * 0.006));
-        D = maxLag + 64;
+        D = (int) (1.6 * maxLag) + 64;
         Dout = maxLag + 8;
         in.assign (N, 0.f);
         out.assign (N, 0.f);
@@ -55,6 +55,7 @@ private:
     double nextGrain = 0, Tin = 200, curRatio = 1.0;
     float corr = 0.f;
     bool voiced = false;
+    float trans = 0.f, phiSet = 1.f; bool follow = false;
 
     bool allowed (int note, int mask) const { return (mask >> (((note % 12) + 12) % 12)) & 1; }
 
@@ -68,6 +69,7 @@ private:
 
     void analyse (const Settings& s)
     {
+        trans = s.transpose; phiSet = s.formantPhi; follow = s.formantFollow;
         const int total = W + maxLag;
         double energy = 0;
         for (int i = 0; i < total; ++i)
@@ -121,13 +123,13 @@ private:
             if (++unvoicedHops > 2) { voiced = false; currentNote = -1; corr *= 0.7f; dbgMidi = -1.f; dbgTarget = -1.f; }
             if (! voiced) Tin = 0.9 * Tin + 0.1 * ((double) maxLag / 3.0);
         }
-        curRatio = std::pow (2.0, (double) corr / 12.0);
+        curRatio = std::pow (2.0, (double) (corr + trans) / 12.0);
     }
 
     void spawn()
     {
         const int T = std::clamp ((int) std::lround (Tin), minLag, maxLag);
-        const double ratio = std::clamp (curRatio, 0.5, 2.0);
+        const double ratio = std::clamp (curRatio, 0.35, 2.8);
         const int64_t target = n - D;
         srcPos += T;
         while (target - srcPos > T) srcPos += T;   // source fell behind: skip a period
@@ -136,12 +138,17 @@ private:
         const int len = 2 * T;
         const int64_t start = (int64_t) std::llround (nextGrain) - T;
         const float g = (float) (1.0 / ratio);
+        const float phi = std::clamp (follow ? (float) ratio : phiSet, 0.63f, 1.59f);
         for (int i = 0; i < len; ++i)
         {
             const int64_t idx = start + i;
             if (idx < n - Dout) continue;
             const float w = 0.5f - 0.5f * std::cos (6.2831853f * ((float) i + 0.5f) / (float) len);
-            out[(size_t) (idx & M)] += w * g * in[(size_t) ((srcPos - T + i) & M)];
+            const double pos = (double) srcPos + (double) (i - T) * phi;
+            const int64_t p0 = (int64_t) std::floor (pos);
+            const float fr = (float) (pos - (double) p0);
+            const float smp = in[(size_t) (p0 & M)] * (1.f - fr) + in[(size_t) ((p0 + 1) & M)] * fr;
+            out[(size_t) (idx & M)] += w * g * smp;
         }
         nextGrain += (double) T / ratio;
     }

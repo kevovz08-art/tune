@@ -25,6 +25,9 @@ public:
     void getStateInformation (juce::MemoryBlock&) override;
     void setStateInformation (const void*, int) override;
 
+    int getMask() const;                 // allowed pitch classes (bit 0 = C)
+    void setCustomMask (int mask);       // switches scale to "Custom"
+
     juce::AudioProcessorValueTreeState apvts;
     std::array<PitchEngine, 2> engines;
 

@@ -5,11 +5,11 @@ const juce::StringArray& RelapseTuneAudioProcessor::keyNames()
 { static const juce::StringArray k { "C","C#","D","D#","E","F","F#","G","G#","A","A#","B" }; return k; }
 
 const juce::StringArray& RelapseTuneAudioProcessor::scaleNames()
-{ static const juce::StringArray s { "Chromatic","Major","Minor","Harmonic Minor","Pentatonic Major","Pentatonic Minor","Blues" }; return s; }
+{ static const juce::StringArray s { "Chromatic","Major","Minor","Harmonic Minor","Pentatonic Major","Pentatonic Minor","Blues","Custom" }; return s; }
 
 static const std::vector<std::vector<int>> kScales {
     { 0,1,2,3,4,5,6,7,8,9,10,11 }, { 0,2,4,5,7,9,11 }, { 0,2,3,5,7,8,10 }, { 0,2,3,5,7,8,11 },
-    { 0,2,4,7,9 }, { 0,3,5,7,10 }, { 0,3,5,6,7,10 } };
+    { 0,2,4,7,9 }, { 0,3,5,7,10 }, { 0,3,5,6,7,10 } };   // index 7 = Custom (uses n0..n11)
 
 juce::AudioProcessorValueTreeState::ParameterLayout RelapseTuneAudioProcessor::createLayout()
 {
@@ -17,16 +17,22 @@ juce::AudioProcessorValueTreeState::ParameterLayout RelapseTuneAudioProcessor::c
     AudioProcessorValueTreeState::ParameterLayout l;
     l.add (std::make_unique<AudioParameterChoice> (ParameterID { "key", 1 }, "Key", keyNames(), 0));
     l.add (std::make_unique<AudioParameterChoice> (ParameterID { "scale", 1 }, "Scale", scaleNames(), 1));
-    l.add (std::make_unique<AudioParameterFloat> (ParameterID { "speed", 1 }, "Retune Speed",
-           NormalisableRange<float> (-100.f, 400.f, 0.1f), 20.f, AudioParameterFloatAttributes().withLabel ("ms")));
+    l.add (std::make_unique<AudioParameterFloat> (ParameterID { "speed", 1 }, "Speed",
+           NormalisableRange<float> (-100.f, 400.f, 0.1f), 20.f));
     l.add (std::make_unique<AudioParameterFloat> (ParameterID { "amount", 1 }, "Amount",
            NormalisableRange<float> (0.f, 1.f, 0.001f), 1.f));
-    l.add (std::make_unique<AudioParameterFloat> (ParameterID { "stab", 1 }, "Note Stabilizer",
-           NormalisableRange<float> (0.f, 1.f, 0.001f), 0.3f));
+    l.add (std::make_unique<AudioParameterChoice> (ParameterID { "stab", 1 }, "Note Stabilizer",
+           StringArray { "None", "Short", "Mid", "Long" }, 1));
     l.add (std::make_unique<AudioParameterFloat> (ParameterID { "doubler", 1 }, "Doubler",
            NormalisableRange<float> (0.f, 1.f, 0.001f), 0.f));
-    l.add (std::make_unique<AudioParameterFloat> (ParameterID { "refa", 1 }, "Reference A",
-           NormalisableRange<float> (415.f, 466.f, 0.1f), 440.f, AudioParameterFloatAttributes().withLabel ("Hz")));
+    l.add (std::make_unique<AudioParameterFloat> (ParameterID { "formant", 1 }, "Formant",
+           NormalisableRange<float> (0.f, 200.f, 1.f), 100.f));
+    l.add (std::make_unique<AudioParameterBool> (ParameterID { "formantOn", 1 }, "Preserve Formants", true));
+    l.add (std::make_unique<AudioParameterInt> (ParameterID { "transpose", 1 }, "Transpose", -12, 12, 0));
+    l.add (std::make_unique<AudioParameterFloat> (ParameterID { "refa", 1 }, "Detune",
+           NormalisableRange<float> (415.f, 466.f, 0.1f), 440.f));
+    for (int i = 0; i < 12; ++i)
+        l.add (std::make_unique<AudioParameterBool> (ParameterID { "n" + String (i), 1 }, "Note " + keyNames()[i], true));
     return l;
 }
 
@@ -34,6 +40,29 @@ RelapseTuneAudioProcessor::RelapseTuneAudioProcessor()
     : AudioProcessor (BusesProperties().withInput ("Input", juce::AudioChannelSet::stereo(), true)
                                        .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "STATE", createLayout()) {}
+
+int RelapseTuneAudioProcessor::getMask() const
+{
+    const int key = (int) *apvts.getRawParameterValue ("key");
+    const int scale = (int) *apvts.getRawParameterValue ("scale");
+    int mask = 0;
+    if (scale >= (int) kScales.size())
+    {
+        for (int i = 0; i < 12; ++i)
+            if (*apvts.getRawParameterValue ("n" + juce::String (i)) > 0.5f) mask |= 1 << i;
+        if (mask == 0) mask = 0xFFF;
+    }
+    else
+        for (int iv : kScales[(size_t) scale]) mask |= 1 << ((iv + key) % 12);
+    return mask;
+}
+
+void RelapseTuneAudioProcessor::setCustomMask (int mask)
+{
+    for (int i = 0; i < 12; ++i)
+        if (auto* p = apvts.getParameter ("n" + juce::String (i))) p->setValueNotifyingHost (((mask >> i) & 1) ? 1.f : 0.f);
+    if (auto* p = apvts.getParameter ("scale")) p->setValueNotifyingHost (p->convertTo0to1 ((float) (scaleNames().size() - 1)));
+}
 
 void RelapseTuneAudioProcessor::prepareToPlay (double sr, int)
 {
@@ -51,15 +80,16 @@ bool RelapseTuneAudioProcessor::isBusesLayoutSupported (const BusesLayout& l) co
 void RelapseTuneAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
 {
     juce::ScopedNoDenormals noDenormals;
+    static const float stabMap[4] = { 0.f, 0.25f, 0.55f, 1.f };
     PitchEngine::Settings s;
-    const int key = (int) *apvts.getRawParameterValue ("key");
-    const int scale = juce::jlimit (0, (int) kScales.size() - 1, (int) *apvts.getRawParameterValue ("scale"));
-    s.mask = 0;
-    for (int iv : kScales[(size_t) scale]) s.mask |= 1 << ((iv + key) % 12);
+    s.mask = getMask();
     s.speedMs = *apvts.getRawParameterValue ("speed");
     s.amount  = *apvts.getRawParameterValue ("amount");
     s.refA    = *apvts.getRawParameterValue ("refa");
-    s.stabilizer = *apvts.getRawParameterValue ("stab");
+    s.stabilizer = stabMap[juce::jlimit (0, 3, (int) *apvts.getRawParameterValue ("stab"))];
+    s.transpose = *apvts.getRawParameterValue ("transpose");
+    s.formantPhi = std::pow (2.f, (*apvts.getRawParameterValue ("formant") - 100.f) / 100.f * (8.f / 12.f));
+    s.formantFollow = *apvts.getRawParameterValue ("formantOn") < 0.5f;
     const float dbl = *apvts.getRawParameterValue ("doubler");
 
     const int nCh = juce::jmin (buffer.getNumChannels(), 2);
