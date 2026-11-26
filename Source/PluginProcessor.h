@@ -33,5 +33,7 @@ public:
 
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
+    std::vector<float> dl; int dlW = 0; float phA = 0.f, phB = 0.f; double sampleRate = 44100.0;
+    float readDelay (float d) const;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (RelapseTuneAudioProcessor)
 };

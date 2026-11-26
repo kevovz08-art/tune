@@ -9,7 +9,7 @@
 class PitchEngine
 {
 public:
-    struct Settings { int mask = 0xFFF; float speedMs = 20.f; float amount = 1.f; float refA = 440.f; };
+    struct Settings { int mask = 0xFFF; float speedMs = 20.f; float amount = 1.f; float refA = 440.f; float stabilizer = 0.3f; };
 
     std::atomic<float> dbgMidi{ -1.f }, dbgTarget{ -1.f };
 
@@ -101,14 +101,14 @@ private:
             const float a = cmnd[(size_t) best - 1], b = cmnd[(size_t) best], c = cmnd[(size_t) best + 1];
             const float den = a - 2.f * b + c;
             const double p = best + (std::fabs (den) > 1e-9f ? 0.5f * (a - c) / den : 0.f);
-            Tin = (voiced && std::fabs (p / Tin - 1.0) < 0.2) ? 0.6 * Tin + 0.4 * p : p;
+            Tin = (voiced && s.speedMs >= 0.f && std::fabs (p / Tin - 1.0) < 0.2) ? 0.6 * Tin + 0.4 * p : p;
             voiced = true; unvoicedHops = 0;
 
             const float f0 = (float) (sr / Tin);
             const float midi = 69.f + 12.f * std::log2 (f0 / s.refA);
             const int cand = nearestAllowed (midi, s.mask);
             if (currentNote < 0 || ! allowed (currentNote, s.mask)
-                || (cand != currentNote && std::fabs (midi - (float) currentNote) - std::fabs (midi - (float) cand) > 0.15f))
+                || (cand != currentNote && std::fabs (midi - (float) currentNote) - std::fabs (midi - (float) cand) > 0.15f + 0.8f * s.stabilizer))
                 currentNote = cand;
 
             const float targetCorr = ((float) currentNote - midi) * s.amount;

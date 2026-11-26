@@ -18,9 +18,13 @@ juce::AudioProcessorValueTreeState::ParameterLayout RelapseTuneAudioProcessor::c
     l.add (std::make_unique<AudioParameterChoice> (ParameterID { "key", 1 }, "Key", keyNames(), 0));
     l.add (std::make_unique<AudioParameterChoice> (ParameterID { "scale", 1 }, "Scale", scaleNames(), 1));
     l.add (std::make_unique<AudioParameterFloat> (ParameterID { "speed", 1 }, "Retune Speed",
-           NormalisableRange<float> (0.f, 400.f, 0.1f, 0.5f), 20.f, AudioParameterFloatAttributes().withLabel ("ms")));
+           NormalisableRange<float> (-100.f, 400.f, 0.1f), 20.f, AudioParameterFloatAttributes().withLabel ("ms")));
     l.add (std::make_unique<AudioParameterFloat> (ParameterID { "amount", 1 }, "Amount",
            NormalisableRange<float> (0.f, 1.f, 0.001f), 1.f));
+    l.add (std::make_unique<AudioParameterFloat> (ParameterID { "stab", 1 }, "Note Stabilizer",
+           NormalisableRange<float> (0.f, 1.f, 0.001f), 0.3f));
+    l.add (std::make_unique<AudioParameterFloat> (ParameterID { "doubler", 1 }, "Doubler",
+           NormalisableRange<float> (0.f, 1.f, 0.001f), 0.f));
     l.add (std::make_unique<AudioParameterFloat> (ParameterID { "refa", 1 }, "Reference A",
            NormalisableRange<float> (415.f, 466.f, 0.1f), 440.f, AudioParameterFloatAttributes().withLabel ("Hz")));
     return l;
@@ -33,6 +37,7 @@ RelapseTuneAudioProcessor::RelapseTuneAudioProcessor()
 
 void RelapseTuneAudioProcessor::prepareToPlay (double sr, int)
 {
+    sampleRate = sr; dl.assign ((size_t) (sr * 0.1), 0.f); dlW = 0;
     for (auto& e : engines) e.prepare (sr);
     setLatencySamples (engines[0].latency());
 }
@@ -54,14 +59,41 @@ void RelapseTuneAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
     s.speedMs = *apvts.getRawParameterValue ("speed");
     s.amount  = *apvts.getRawParameterValue ("amount");
     s.refA    = *apvts.getRawParameterValue ("refa");
+    s.stabilizer = *apvts.getRawParameterValue ("stab");
+    const float dbl = *apvts.getRawParameterValue ("doubler");
 
     const int nCh = juce::jmin (buffer.getNumChannels(), 2);
-    for (int ch = 0; ch < nCh; ++ch)
+    const int ns = buffer.getNumSamples();
+    auto* L = buffer.getWritePointer (0);
+    auto* R = nCh == 2 ? buffer.getWritePointer (1) : nullptr;
+    const float twoPi = 6.2831853f;
+    for (int i = 0; i < ns; ++i)
     {
-        auto* d = buffer.getWritePointer (ch);
-        for (int i = 0; i < buffer.getNumSamples(); ++i)
-            d[i] = engines[(size_t) ch].process (d[i], s);
+        const float yl = engines[0].process (L[i], s);
+        const float yr = R ? engines[1].process (R[i], s) : yl;
+        if (dbl > 0.001f && ! dl.empty())
+        {
+            dl[(size_t) dlW] = 0.5f * (yl + yr);
+            const float dA = (0.022f + 0.004f * std::sin (phA)) * (float) sampleRate;
+            const float dB = (0.031f + 0.004f * std::sin (phB)) * (float) sampleRate;
+            phA += twoPi * 0.35f / (float) sampleRate; if (phA > twoPi) phA -= twoPi;
+            phB += twoPi * 0.27f / (float) sampleRate; if (phB > twoPi) phB -= twoPi;
+            L[i] = yl + dbl * 0.7f * readDelay (dA);
+            if (R) R[i] = yr + dbl * 0.7f * readDelay (dB);
+            if (++dlW >= (int) dl.size()) dlW = 0;
+        }
+        else { L[i] = yl; if (R) R[i] = yr; }
     }
+}
+
+float RelapseTuneAudioProcessor::readDelay (float d) const
+{
+    const int size = (int) dl.size();
+    float rp = (float) dlW - d;
+    while (rp < 0.f) rp += (float) size;
+    const int i0 = (int) rp % size, i1 = (i0 + 1) % size;
+    const float f = rp - std::floor (rp);
+    return dl[(size_t) i0] * (1.f - f) + dl[(size_t) i1] * f;
 }
 
 juce::AudioProcessorEditor* RelapseTuneAudioProcessor::createEditor() { return new RelapseTuneEditor (*this); }
