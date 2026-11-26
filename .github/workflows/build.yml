@@ -1,4 +1,4 @@
-name: Build RelapseTune VST3
+name: Build RelapseTune
 on:
   push:
   workflow_dispatch:
@@ -11,13 +11,18 @@ jobs:
         run: cmake -B build -G "Visual Studio 17 2022" -A x64
       - name: Build
         run: cmake --build build --config Release --parallel
-      - name: Package
+      - name: Package VST3
         shell: pwsh
         run: |
           $p = Get-ChildItem -Path build -Recurse -Directory -Filter "RelapseTune.vst3" | Select-Object -First 1
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item $p.FullName -Destination dist -Recurse
+      - name: Build installer
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" RelapseTune.iss
       - uses: actions/upload-artifact@v4
         with:
-          name: RelapseTune-VST3-Windows
-          path: dist
+          name: RelapseTune-Installer
+          path: installer/RelapseTune-Setup.exe
